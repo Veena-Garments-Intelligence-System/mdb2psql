@@ -1,12 +1,11 @@
 import sys
 from src.mdb_sync.logging_config import configure_logging, get_logger
-
-logger = get_logger(__name__)
 from src.mdb_sync.infrastructure.mdb.repository import MDBRepository
 from src.mdb_sync.application.sync_engine import SyncEngine
 from src.mdb_sync.scheduler.sync_scheduler import SyncScheduler
-
 from src.mdb_sync.infrastructure.postgres.database import init_db
+
+logger = get_logger(__name__)
 
 def main():
     configure_logging()

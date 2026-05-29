@@ -76,5 +76,6 @@ class RG(BaseEntity):
     rg_id: str
     customer_id: Optional[str] = None
     rgtype: Optional[str] = None
+    bill_date: Optional[str] = None
     net_amount: Optional[float] = None
 

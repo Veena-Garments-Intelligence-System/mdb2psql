@@ -1,11 +1,11 @@
 from typing import Optional
+from src.mdb_sync.config import settings
 from src.mdb_sync.infrastructure.mdb.repository import MDBRepository
 from src.mdb_sync.infrastructure.postgres.repository import PostgresRepository
 from src.mdb_sync.application.mapper import DataMapper
 from src.mdb_sync.logging_config import get_logger
 
 logger = get_logger(__name__)
-from src.mdb_sync.config import settings
 
 class SyncEngine:
     def __init__(self, mdb_repo: MDBRepository):
@@ -43,11 +43,17 @@ class SyncEngine:
             nonlocal upserted_count
             if not data_batch:
                 return
-            self.pg_repo.upsert_batch(config["pg_model"], data_batch, config["pg_pk"])
-            self.pg_repo.update_fingerprints_batch(table_name, fingerprint_batch)
-            upserted_count += len(data_batch)
-            data_batch.clear()
-            fingerprint_batch.clear()
+            try:
+                self.pg_repo.upsert_batch(config["pg_model"], data_batch, config["pg_pk"])
+                self.pg_repo.update_fingerprints_batch(table_name, fingerprint_batch)
+                upserted_count += len(data_batch)
+            except Exception as e:
+                self.pg_repo.rollback()
+                logger.error("Batch flush failed", table=table_name, error=str(e))
+                raise
+            finally:
+                data_batch.clear()
+                fingerprint_batch.clear()
 
         for row in row_generator:
             try:
@@ -79,7 +85,12 @@ class SyncEngine:
 
             except Exception as e:
                 error_count += 1
-                logger.debug("Failed to process row", table=table_name, error=str(e), pk=row.get(config["pk"]))
+                logger.error("Failed to process row or batch", table=table_name, error=str(e), pk=row.get(config["pk"]))
+                # If flush_batch raised, it already rolled back and cleared.
+                # If mapping failed, we don't strictly need rollback but it's safe.
+                self.pg_repo.rollback()
+                data_batch.clear()
+                fingerprint_batch.clear()
                 continue
 
         # Final flush
@@ -92,6 +103,7 @@ class SyncEngine:
             except Exception as e:
                 error_count += len(data_batch)
                 logger.error("Final batch flush failed", table=table_name, error=str(e))
+                self.pg_repo.rollback()
             
         return {"table": table_name, "mode": "incremental", "scanned": scanned_count, "upserted": upserted_count, "errors": error_count}
 
@@ -119,11 +131,17 @@ class SyncEngine:
             nonlocal updated_count
             if not data_batch:
                 return
-            self.pg_repo.upsert_batch(config["pg_model"], data_batch, config["pg_pk"])
-            self.pg_repo.update_fingerprints_batch(table_name, fingerprint_batch)
-            updated_count += len(data_batch)
-            data_batch.clear()
-            fingerprint_batch.clear()
+            try:
+                self.pg_repo.upsert_batch(config["pg_model"], data_batch, config["pg_pk"])
+                self.pg_repo.update_fingerprints_batch(table_name, fingerprint_batch)
+                updated_count += len(data_batch)
+            except Exception as e:
+                self.pg_repo.rollback()
+                logger.error("Reconciliation batch flush failed", table=table_name, error=str(e))
+                raise
+            finally:
+                data_batch.clear()
+                fingerprint_batch.clear()
 
         for row in row_generator:
             try:
@@ -156,7 +174,10 @@ class SyncEngine:
 
             except Exception as e:
                 error_count += 1
-                logger.debug("Failed to process reconciliation row", table=table_name, error=str(e), pk=row.get(config["pk"]))
+                logger.debug("Failed to process reconciliation row or batch", table=table_name, error=str(e), pk=row.get(config["pk"]))
+                self.pg_repo.rollback()
+                data_batch.clear()
+                fingerprint_batch.clear()
                 continue
 
         if data_batch:
@@ -164,7 +185,8 @@ class SyncEngine:
                 flush_batch()
             except Exception as e:
                 error_count += len(data_batch)
-                logger.error("Reconciliation batch flush failed", table=table_name, error=str(e))
+                logger.error("Reconciliation final batch flush failed", table=table_name, error=str(e))
+                self.pg_repo.rollback()
 
         if scanned_count < chunk_limit:
             new_last_reconcile_pk = None
@@ -195,11 +217,17 @@ class SyncEngine:
             nonlocal upserted_count
             if not data_batch:
                 return
-            self.pg_repo.upsert_batch(config["pg_model"], data_batch, config["pg_pk"])
-            self.pg_repo.update_fingerprints_batch(table_name, fingerprint_batch)
-            upserted_count += len(data_batch)
-            data_batch.clear()
-            fingerprint_batch.clear()
+            try:
+                self.pg_repo.upsert_batch(config["pg_model"], data_batch, config["pg_pk"])
+                self.pg_repo.update_fingerprints_batch(table_name, fingerprint_batch)
+                upserted_count += len(data_batch)
+            except Exception as e:
+                self.pg_repo.rollback()
+                logger.error("Master batch flush failed", table=table_name, error=str(e))
+                raise
+            finally:
+                data_batch.clear()
+                fingerprint_batch.clear()
 
         for row in row_generator:
             try:
@@ -222,7 +250,10 @@ class SyncEngine:
 
             except Exception as e:
                 error_count += 1
-                logger.debug("Failed to process master row", table=table_name, error=str(e), pk=row.get(config["pk"]))
+                logger.debug("Failed to process master row or batch", table=table_name, error=str(e), pk=row.get(config["pk"]))
+                self.pg_repo.rollback()
+                data_batch.clear()
+                fingerprint_batch.clear()
                 continue
 
         if data_batch:
@@ -231,6 +262,7 @@ class SyncEngine:
                 self.pg_repo.commit()
             except Exception as e:
                 error_count += len(data_batch)
-                logger.error("Master batch flush failed", table=table_name, error=str(e))
+                logger.error("Master final batch flush failed", table=table_name, error=str(e))
+                self.pg_repo.rollback()
 
         return {"table": table_name, "mode": "full", "scanned": scanned_count, "upserted": upserted_count, "errors": error_count}

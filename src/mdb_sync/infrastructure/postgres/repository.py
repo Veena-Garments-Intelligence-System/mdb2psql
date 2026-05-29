@@ -69,9 +69,17 @@ class PostgresRepository:
         # Determine which columns to update
         # We use the first record to identify the fields
         first_row = data_list[0]
+        
+        # We don't update the unique col or raw_id
+        # We ONLY exclude created_at if it's NOT in the provided data
+        # (This allows us to "fix" dates in Postgres if they change in MDB)
+        exclude = {unique_col, 'raw_id'}
+        if 'created_at' not in first_row:
+            exclude.add('created_at')
+            
         update_cols = [
             k for k in first_row.keys()
-            if k not in (unique_col, 'raw_id', 'created_at')
+            if k not in exclude
         ]
         
         update_dict = {col: getattr(stmt.excluded, col) for col in update_cols}
@@ -93,10 +101,15 @@ class PostgresRepository:
     def upsert(self, model_class: Type[T], data: dict, unique_col: str):
         stmt = insert(model_class).values(**data)
         
-        # Don't update the unique col, raw_id, or created_at
+        # We don't update the unique col or raw_id
+        # We ONLY exclude created_at if it's NOT in the provided data
+        exclude = {unique_col, 'raw_id'}
+        if 'created_at' not in data:
+            exclude.add('created_at')
+
         update_dict = {
             k: v for k, v in stmt.excluded.items() 
-            if k not in (unique_col, 'raw_id', 'created_at')
+            if k not in exclude
         }
         
         # We only update if the checksums differ
@@ -184,11 +197,15 @@ class PostgresRepository:
     def prune_processed_rows(self, table_name: str, retention_days: int):
         from sqlalchemy import text
         # Only prune rows that are is_processed = TRUE and older than retention_days
-        # We use a raw SQL delete for performance on large tables
+        # For tables like raw_rg, we use created_at as updated_at was removed.
+        ts_col = "updated_at"
+        if table_name == "raw_rg":
+            ts_col = "created_at"
+            
         query = text(f"""
             DELETE FROM {table_name}
             WHERE is_processed = TRUE
-            AND updated_at < NOW() - INTERVAL '{retention_days} days'
+            AND {ts_col} < NOW() - INTERVAL '{retention_days} days'
         """)
         result = self.session.execute(query)
         return result.rowcount

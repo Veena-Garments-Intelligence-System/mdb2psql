@@ -49,11 +49,18 @@ class RawReceipt(Base, IngestionMixin):
     bank_name: Mapped[Optional[str]] = mapped_column(Text)
     receipt_type: Mapped[Optional[str]] = mapped_column(Text)
 
-class RawRG(Base, IngestionMixin):
+class RawRG(Base):
     __tablename__ = "raw_rg"
+    raw_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    checksum: Mapped[str] = mapped_column(Text, nullable=False)
+    source_system: Mapped[str] = mapped_column(Text, nullable=False)
+    is_processed: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
     rg_id: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
     customer_id: Mapped[Optional[str]] = mapped_column(Text)
     rgtype: Mapped[Optional[str]] = mapped_column(Text)
+    bill_date: Mapped[Optional[str]] = mapped_column(Text)
     net_amount: Mapped[Optional[float]] = mapped_column(Numeric)
 
 class SyncFingerprint(Base):

@@ -1,6 +1,6 @@
 import uuid
 from typing import Dict, Any, Optional
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from src.mdb_sync.domain import models
 from src.mdb_sync.infrastructure.postgres import models as pg_models
 from src.mdb_sync.logging_config import get_logger
@@ -46,9 +46,11 @@ class DataMapper:
                 "RG_ID": "rg_id",
                 "CUSTOMER_ID": "customer_id",
                 "RGTYPE": "rgtype",
+                "BILL_DATE": "bill_date",
                 "NET_AMOUNT": "net_amount",
             }
         },
+
         "CUSTOMER_MASTER": {
             "model": models.Customer,
             "pg_model": pg_models.RawCustomer,
@@ -126,6 +128,54 @@ class DataMapper:
                 continue
 
         logger.debug("Date parsing failed", original=val, extracted=raw_date)
+        return None
+
+    @staticmethod
+    def _parse_to_datetime(val: Any) -> Optional[datetime]:
+        if val is None or val == "":
+            return None
+        
+        if isinstance(val, datetime):
+            return val
+        if isinstance(val, (date, datetime)):
+            try:
+                # Handle cases where it might be a date object
+                if isinstance(val, date) and not isinstance(val, datetime):
+                    return datetime.combine(val, datetime.min.time()).replace(tzinfo=timezone.utc)
+                return val
+            except Exception:
+                pass
+
+        # Try to parse string
+        s_val = str(val).strip()
+        
+        # User requested support for "08/05/22 00:00:00"
+        # We'll try common patterns
+        formats = [
+            "%d/%m/%y %H:%M:%S",
+            "%d/%m/%Y %H:%M:%S",
+            "%Y-%m-%d %H:%M:%S",
+            "%d-%m-%y %H:%M:%S",
+            "%d-%m-%Y %H:%M:%S",
+            "%m/%d/%y %H:%M:%S",
+            "%m/%d/%Y %H:%M:%S",
+            "%d/%m/%y", # Just date part
+            "%d/%m/%Y",
+            "%Y-%m-%d",
+        ]
+        
+        for fmt in formats:
+            try:
+                dt = datetime.strptime(s_val, fmt)
+                return dt.replace(tzinfo=timezone.utc)
+            except Exception:
+                continue
+        
+        # Fallback to existing date parser
+        d = DataMapper._parse_date(val)
+        if d:
+            return datetime.combine(d, datetime.min.time()).replace(tzinfo=timezone.utc)
+            
         return None
 
     @staticmethod
@@ -250,4 +300,18 @@ class DataMapper:
         data["checksum"] = domain_model.checksum
         data["source_system"] = source_system
         data["is_processed"] = False
+
+        # POPULATE created_at FROM TRANSACTION DATE
+        # This applies to Sales, Receipts, and ReturnGoods as requested
+        transactional_date = None
+        if hasattr(domain_model, "bill_date"):
+            transactional_date = domain_model.bill_date
+        elif hasattr(domain_model, "receipt_date"):
+            transactional_date = domain_model.receipt_date
+            
+        if transactional_date:
+            dt = DataMapper._parse_to_datetime(transactional_date)
+            if dt:
+                data["created_at"] = dt
+                
         return data

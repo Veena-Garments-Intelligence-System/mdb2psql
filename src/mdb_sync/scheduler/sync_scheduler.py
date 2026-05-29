@@ -5,12 +5,11 @@ from datetime import datetime, timezone
 from typing import Optional
 from src.mdb_sync.application.sync_engine import SyncEngine
 from src.mdb_sync.logging_config import get_logger
-
-logger = get_logger(__name__)
 from src.mdb_sync.config import settings
 from src.mdb_sync.infrastructure.postgres.database import SessionLocal
 from src.mdb_sync.infrastructure.postgres.repository import PostgresRepository
 
+logger = get_logger(__name__)
 
 class SyncScheduler:
     def __init__(self, sync_engine: SyncEngine):
@@ -141,6 +140,7 @@ class SyncScheduler:
 
             # Transactional Tables
             transactional_tables = ["BILL_MASTER", "Receipt_Master", "ReturnGoods"]
+
             for table in transactional_tables:
                 tasks.append((table, "incremental"))
                 tasks.append((table, "reconcile"))

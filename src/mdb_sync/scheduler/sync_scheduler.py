@@ -104,27 +104,29 @@ class SyncScheduler:
         wait_start = datetime.now(timezone.utc)
         max_wait = timedelta(minutes=settings.LOCK_MAX_WAIT_MINUTES)
         
-        while not lock_acquired and not self._stop_event.is_set():
-            with SessionLocal() as db:
-                pg_repo = PostgresRepository(db)
-                lock_acquired = pg_repo.acquire_lock("MDB_FILE_LOCK", "dbupdater", timeout_minutes=20)
-                db.commit()
-            
-            if not lock_acquired:
-                elapsed = datetime.now(timezone.utc) - wait_start
-                if elapsed > max_wait:
-                    logger.warning("Timed out waiting for MDB lock. Skipping this cycle.", waited_sec=elapsed.total_seconds())
-                    return
-                
-                logger.info("MDB file is currently locked. Retrying soon...", 
-                            waited_sec=round(elapsed.total_seconds()),
-                            retry_in=settings.LOCK_RETRY_INTERVAL_SECONDS)
-                self._stop_event.wait(settings.LOCK_RETRY_INTERVAL_SECONDS)
-
-        if self._stop_event.is_set():
-            return
-
         try:
+            while not lock_acquired and not self._stop_event.is_set():
+                with SessionLocal() as db:
+                    pg_repo = PostgresRepository(db)
+                    # We use a 20-minute timeout, but we should ideally refresh it 
+                    # if the sync takes longer. For now, 20m is the hard limit.
+                    lock_acquired = pg_repo.acquire_lock("MDB_FILE_LOCK", "dbupdater", timeout_minutes=20)
+                    db.commit()
+                
+                if not lock_acquired:
+                    elapsed = datetime.now(timezone.utc) - wait_start
+                    if elapsed > max_wait:
+                        logger.warning("Timed out waiting for MDB lock. Skipping this cycle.", waited_sec=elapsed.total_seconds())
+                        return
+                    
+                    logger.info("MDB file is currently locked. Retrying soon...", 
+                                waited_sec=round(elapsed.total_seconds()),
+                                retry_in=settings.LOCK_RETRY_INTERVAL_SECONDS)
+                    self._stop_event.wait(settings.LOCK_RETRY_INTERVAL_SECONDS)
+
+            if self._stop_event.is_set():
+                return
+
             logger.debug("Starting parallel sync cycle")
             
             # 2. Pruning (Priority: Cleanup first)
@@ -189,10 +191,12 @@ class SyncScheduler:
         
         finally:
             # 5. RELEASE GLOBAL MDB LOCK
-            with SessionLocal() as db:
-                pg_repo = PostgresRepository(db)
-                pg_repo.release_lock("MDB_FILE_LOCK", "dbupdater")
-                db.commit()
+            if lock_acquired:
+                with SessionLocal() as db:
+                    pg_repo = PostgresRepository(db)
+                    pg_repo.release_lock("MDB_FILE_LOCK", "dbupdater")
+                    db.commit()
+                logger.debug("Released MDB lock")
 
     def start(self):
         logger.info("Starting scheduler", interval=self.interval, prune_interval=self.prune_interval)

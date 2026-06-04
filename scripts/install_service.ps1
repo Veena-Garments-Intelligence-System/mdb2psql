@@ -39,6 +39,10 @@ Write-Host "Installing service $SERVICE_NAME..." -ForegroundColor Cyan
 & $NSSM set $SERVICE_NAME AppStderr $LOG_FILE
 & $NSSM set $SERVICE_NAME Start SERVICE_AUTO_START
 
+# Configure Service Recovery Settings via sc.exe (Requirement 11)
+# Restarts service after 60s (60000ms) on 1st, 2nd, and subsequent failures. Reset failure count after 1 day (86400s)
+& sc.exe failure $SERVICE_NAME reset= 86400 actions= restart/60000/restart/60000/restart/60000
+
 # Start the service
 & $NSSM start $SERVICE_NAME
 

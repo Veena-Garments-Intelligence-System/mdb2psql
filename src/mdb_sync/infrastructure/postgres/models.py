@@ -92,3 +92,35 @@ class ExternalLock(Base):
     locked_by: Mapped[str] = mapped_column(Text, nullable=False)
     acquired_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+class SyncCheckpoint(Base):
+    __tablename__ = "sync_checkpoints"
+    table_name: Mapped[str] = mapped_column(Text, primary_key=True)
+    last_sync_key: Mapped[Optional[str]] = mapped_column(Text)
+    last_reconcile_key: Mapped[Optional[str]] = mapped_column(Text)
+    last_sync_timestamp: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    cycle_id: Mapped[Optional[str]] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, default="SUCCESS")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class SyncFailure(Base):
+    __tablename__ = "sync_failures"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    source_table: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    primary_key: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    error: Mapped[str] = mapped_column(Text, nullable=False)
+    payload: Mapped[str] = mapped_column(Text, nullable=False)
+    retry_count: Mapped[int] = mapped_column(Integer, default=0)
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, index=True)
+
+class SyncRun(Base):
+    __tablename__ = "sync_runs"
+    cycle_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    start_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    end_time: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    duration: Mapped[Optional[float]] = mapped_column(Numeric)
+    rows_scanned: Mapped[int] = mapped_column(Integer, default=0)
+    rows_updated: Mapped[int] = mapped_column(Integer, default=0)
+    rows_failed: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(Text, nullable=False) # RUNNING, SUCCESS, FAILED
+

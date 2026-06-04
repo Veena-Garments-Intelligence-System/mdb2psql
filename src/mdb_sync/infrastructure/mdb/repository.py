@@ -1,7 +1,10 @@
 import pyodbc
+import time
 from typing import Dict, Any, Optional, Iterator
 from src.mdb_sync.config import settings
 from src.mdb_sync.logging_config import get_logger
+from src.mdb_sync.utils.circuit_breaker import mdb_breaker
+from src.mdb_sync.utils.metrics import MDB_LATENCY
 
 logger = get_logger(__name__)
 
@@ -11,7 +14,6 @@ class MDBRepository:
         self.chunk_size = 1000
 
     def execute_query_yield(self, query: str, params: tuple = ()) -> Iterator[Dict[str, Any]]:
-        # Connection managed safely, retries at the caller level if necessary or just fail fast per chunk
         from src.mdb_sync.concurrency import mdb_lock
         
         def robust_date_handler(value):
@@ -22,13 +24,10 @@ class MDBRepository:
             except Exception:
                 return repr(value)
 
-        rows = []
-        try:
-            # ACQUIRE LOCK ONLY FOR THE READ PHASE
+        def _read_data():
+            rows_fetched = []
             with mdb_lock:
                 with pyodbc.connect(self.conn_str, readonly=True) as conn:
-                    # MDBTools (Linux) needs manual date conversion, but the 
-                    # official Microsoft Driver (Windows) handles it natively.
                     if "MDBTools" in self.conn_str:
                         conn.add_output_converter(pyodbc.SQL_TYPE_TIMESTAMP, robust_date_handler)
                         conn.add_output_converter(pyodbc.SQL_TYPE_DATE, robust_date_handler)
@@ -37,30 +36,38 @@ class MDBRepository:
                     cursor.execute(query, params)
                     columns = [column[0].strip() for column in cursor.description]
                     
-                    # Fast fetch into memory to release the lock as soon as possible
                     while True:
                         try:
                             row = cursor.fetchone()
                             if row is None:
                                 break
-                            rows.append(dict(zip(columns, row)))
+                            rows_fetched.append(dict(zip(columns, row)))
                         except Exception as e:
                             logger.error("Failed to fetch individual row from MDB", error=str(e))
                             continue
+            return rows_fetched
+
+        start_time = time.time()
+        try:
+            # Execute with breaker
+            rows = mdb_breaker(_read_data)
             
-            # YIELD OUTSIDE THE LOCK
-            # This allows other threads to acquire mdb_lock and start their read phase
-            # while this thread performs the slow DataMapping and Postgres upserts.
+            # Record latency
+            elapsed_ms = (time.time() - start_time) * 1000
+            MDB_LATENCY.labels(operation="execute_query").observe(elapsed_ms)
+            
+            # Yield outside the lock
             for row_dict in rows:
                 yield row_dict
 
         except Exception as e:
+            elapsed_ms = (time.time() - start_time) * 1000
+            MDB_LATENCY.labels(operation="execute_query_error").observe(elapsed_ms)
             logger.error("MDB query failed", error=str(e), query=query)
             raise
 
     def get_new_records(self, table: str, pk_col: str, last_pk: Optional[str]) -> Iterator[Dict[str, Any]]:
         if "MDBTools" in self.conn_str:
-            # MDBTools lacks parameterized query and ORDER BY support
             query = f"SELECT * FROM {table}"
             return self.execute_query_yield(query)
         
@@ -81,5 +88,3 @@ class MDBRepository:
         else:
             query = f"SELECT * FROM {table}"
         return self.execute_query_yield(query)
-
-

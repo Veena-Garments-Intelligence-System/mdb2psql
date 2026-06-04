@@ -1,7 +1,7 @@
 import uuid
 from datetime import timezone
 from src.mdb_sync.application.mapper import DataMapper
-from src.mdb_sync.domain.models import Sale, RG, Customer, Receipt
+from src.mdb_sync.domain.models import Sale, RG
 
 def test_deterministic_raw_id():
     sale = Sale(

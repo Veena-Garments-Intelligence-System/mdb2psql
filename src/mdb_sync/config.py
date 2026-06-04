@@ -46,8 +46,35 @@ class Settings(BaseSettings):
     RETENTION_DAYS_RECEIPTS: int = 30
     RETENTION_DAYS_RG: int = 30
 
+    # DB Connection Pool configuration
+    DB_POOL_SIZE: int = 20
+    DB_MAX_OVERFLOW: int = 40
+    DB_POOL_RECYCLE: int = 1800
+    DB_POOL_TIMEOUT: int = 30
+
+    # Startup Resilience settings (Requirement 1)
+    DB_STARTUP_RETRY_LIMIT: int | None = None  # None for infinite retries
+    DB_STARTUP_MIN_BACKOFF: float = 1.0
+    DB_STARTUP_MAX_BACKOFF: float = 60.0
+    DB_STARTUP_BACKOFF_FACTOR: float = 2.0
+
+    # Circuit Breaker configurations
+    CB_FAILURE_THRESHOLD: int = 5
+    CB_RECOVERY_TIMEOUT: int = 30  # seconds cooldown
+    CB_SUCCESS_THRESHOLD: int = 2
+
+    # Health / Metrics HTTP Server configuration
+    HEALTH_HOST: str = "0.0.0.0"
+    HEALTH_PORT: int = 8000
+
+    # Alerting configurations
+    ALERT_LAG_THRESHOLD_MINUTES: int = 120
+    SLACK_WEBHOOK_URL: str | None = None
+    WEBHOOK_URL: str | None = None
+
     # Logging
     LOG_LEVEL: str = "debug"
     LOG_FORMAT: str = "auto"  # "auto", "json", or "console"
 
 settings = Settings()
+

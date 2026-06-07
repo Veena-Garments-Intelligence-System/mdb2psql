@@ -51,7 +51,7 @@ def recreate_db_engine():
         SessionLocal.configure(bind=engine)
         logger.info("database_engine_recreated")
 
-def log_postgres_connection_failure(e: Exception, retry_in_seconds: float):
+def log_postgres_connection_failure(e: Exception, retry_in_seconds: float, attempt: int):
     """Logs database connectivity failures in a structured JSON format (Requirement 7)."""
     try:
         parsed = urlparse(settings.postgres_url)
@@ -61,20 +61,33 @@ def log_postgres_connection_failure(e: Exception, retry_in_seconds: float):
         host = "unknown"
         database = "unknown"
         
-    logger.error(
+    # Only log as ERROR if it's not a common connection issue or if we've tried many times
+    # For transient retries, keep it as WARNING or DEBUG to stay "clean"
+    log_func = logger.warning if attempt < 10 else logger.error
+    
+    log_func(
         "postgres_connection_failed",
         host=host,
         database=database,
+        attempt=attempt,
         exception_type=type(e).__name__,
         error_message=str(e).split('\n')[0],
         retry_in_seconds=round(retry_in_seconds)
     )
 
+# Global state to track last diagnostic status to prevent log spamming
+_last_diagnostics = {
+    "internet": True,
+    "dns": True,
+    "host_reachable": True
+}
+
 def check_and_log_connectivity_diagnostics(retry_in_seconds: float) -> dict:
     """
     Validates DNS resolution, internet reachability, and postgres host port reachability.
-    Prevents false assumptions that PostgreSQL is down when the issue is local network/DNS (Requirement 8).
+    Only logs if the status has changed from the previous check to keep logs clean.
     """
+    global _last_diagnostics
     diagnostics = {
         "internet": False,
         "dns": False,
@@ -115,23 +128,30 @@ def check_and_log_connectivity_diagnostics(retry_in_seconds: float) -> dict:
     except Exception:
         pass
         
-    # Log visibility results
-    internet_status = "OK" if diagnostics["internet"] else "FAILED"
-    dns_status = "OK" if diagnostics["dns"] else "FAILED"
-    host_status = "OK" if diagnostics["host_reachable"] else "FAILED"
-    
-    logger.info(
-        "connectivity_diagnostics",
-        internet_status=internet_status,
-        dns_status=dns_status,
-        postgres_host_reachable=host_status
+    # Check for state changes
+    has_changed = (
+        diagnostics["internet"] != _last_diagnostics["internet"] or
+        diagnostics["dns"] != _last_diagnostics["dns"] or
+        diagnostics["host_reachable"] != _last_diagnostics["host_reachable"]
     )
     
-    if not diagnostics["internet"]:
-        logger.warning("Internet Status: FAILED")
-    if not diagnostics["host_reachable"]:
-        logger.warning("PostgreSQL Host Unreachable")
+    if has_changed:
+        internet_status = "OK" if diagnostics["internet"] else "FAILED"
+        dns_status = "OK" if diagnostics["dns"] else "FAILED"
+        host_status = "OK" if diagnostics["host_reachable"] else "FAILED"
         
+        logger.info(
+            "connectivity_state_changed",
+            internet_status=internet_status,
+            dns_status=dns_status,
+            postgres_host_reachable=host_status
+        )
+        _last_diagnostics = {
+            "internet": diagnostics["internet"],
+            "dns": diagnostics["dns"],
+            "host_reachable": diagnostics["host_reachable"]
+        }
+    
     return diagnostics
 
 def init_db():
@@ -156,21 +176,24 @@ def init_db():
         check_and_log_connectivity_diagnostics(sleep_time)
         
         try:
-            # Try to connect and execute a test query
+            # 1. Try to connect and execute a test query
             with engine.connect() as conn:
                 conn.execute(select(1))
-                
+            
+            # 2. Try to initialize schema
+            Base.metadata.create_all(bind=engine)
+            
             logger.info("Internet Status: OK")
             logger.info("DNS Resolution: OK")
             logger.info("PostgreSQL Reachable: OK")
-            logger.info("Connection Established")
+            logger.info("Connection Established and Schema Verified")
             break
         except Exception as e:
             retry_count += 1
             elapsed = time.time() - start_time
             
             # Log structured failure
-            log_postgres_connection_failure(e, sleep_time)
+            log_postgres_connection_failure(e, sleep_time, retry_count)
             
             if retry_limit is not None and retry_count >= retry_limit:
                 logger.critical(
@@ -182,13 +205,6 @@ def init_db():
                 
             logger.info(f"Retrying in {round(sleep_time)} seconds... Attempt {retry_count}")
             time.sleep(sleep_time)
-            
-    try:
-        Base.metadata.create_all(bind=engine)
-        logger.info("Database schemas verified/created successfully")
-    except Exception as e:
-        logger.exception("Failed to initialize database schema")
-        raise e
 
 def get_db():
     db = SessionLocal()

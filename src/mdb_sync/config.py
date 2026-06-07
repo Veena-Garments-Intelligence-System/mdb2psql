@@ -73,7 +73,7 @@ class Settings(BaseSettings):
     WEBHOOK_URL: str | None = None
 
     # Logging
-    LOG_LEVEL: str = "debug"
+    LOG_LEVEL: str = "info"
     LOG_FORMAT: str = "auto"  # "auto", "json", or "console"
 
 settings = Settings()

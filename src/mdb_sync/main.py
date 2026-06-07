@@ -26,12 +26,22 @@ def main():
     signal.signal(signal.SIGTERM, handle_shutdown)
 
     try:
-        # 1. Resilient startup connection (Requirement 1 & 12)
-        init_db()
-        
-        # 2. Start health checks and Prometheus server (Requirement 8)
+        # 1. Start health checks and Prometheus server (Requirement 8)
+        # Started early to provide visibility even if DB is down during startup
         from src.mdb_sync.utils.health import start_health_server
         start_health_server()
+
+        # 2. Resilient startup connection (Requirement 1 & 12)
+        # This will loop infinitely by default until connection is established
+        init_db()
+        
+        # Cleanup stale runs from previous crashes
+        with SessionLocal() as db:
+            from src.mdb_sync.infrastructure.postgres.repository import PostgresRepository
+            pg_repo = PostgresRepository(db)
+            pg_repo.cleanup_stale_runs()
+            db.commit()
+            logger.info("Cleanup of stale sync runs completed.")
         
         # 3. Initialize scheduler loop
         mdb_repo = MDBRepository()

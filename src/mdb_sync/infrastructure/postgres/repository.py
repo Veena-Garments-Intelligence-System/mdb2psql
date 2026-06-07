@@ -273,12 +273,13 @@ class PostgresRepository:
             return result.rowcount
         return self._execute_with_breaker("prune_processed_rows", _op)
 
-    def commit(self):
+    def cleanup_stale_runs(self):
+        """Identifies and marks 'RUNNING' runs from previous instances as 'INTERRUPTED'."""
         def _op():
-            self.session.commit()
-        self._execute_with_breaker("commit", _op)
-
-    def rollback(self):
-        def _op():
-            self.session.rollback()
-        self._execute_with_breaker("rollback", _op)
+            from sqlalchemy import update
+            self.session.execute(
+                update(SyncRun)
+                .where(SyncRun.status == "RUNNING")
+                .values(status="INTERRUPTED", end_time=utcnow())
+            )
+        self._execute_with_breaker("cleanup_stale_runs", _op)

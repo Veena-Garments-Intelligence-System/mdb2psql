@@ -24,47 +24,69 @@ class MDBRepository:
             except Exception:
                 return repr(value)
 
-        def _read_data():
-            rows_fetched = []
-            with mdb_lock:
-                with pyodbc.connect(self.conn_str, readonly=True) as conn:
-                    if "MDBTools" in self.conn_str:
-                        conn.add_output_converter(pyodbc.SQL_TYPE_TIMESTAMP, robust_date_handler)
-                        conn.add_output_converter(pyodbc.SQL_TYPE_DATE, robust_date_handler)
+        # Optimization: Use a generator to avoid materializing large lists in memory.
+        # We handle retries at the connection level. If a fetch fails mid-query, 
+        # we retry the entire query (relying on upserts to handle duplicates).
+        max_retries = 3
+        retry_delay = 2
+        
+        start_time = time.time()
+        
+        for attempt in range(max_retries):
+            try:
+                with mdb_lock:
+                    # We wrap the connection and execution in the breaker via a helper
+                    def _connect_and_execute():
+                        conn = pyodbc.connect(self.conn_str, readonly=True)
+                        if "MDBTools" in self.conn_str:
+                            conn.add_output_converter(pyodbc.SQL_TYPE_TIMESTAMP, robust_date_handler)
+                            conn.add_output_converter(pyodbc.SQL_TYPE_DATE, robust_date_handler)
+                        
+                        cursor = conn.cursor()
+                        cursor.execute(query, params)
+                        return conn, cursor
+
+                    conn, cursor = mdb_breaker(_connect_and_execute)
                     
-                    cursor = conn.cursor()
-                    cursor.execute(query, params)
-                    columns = [column[0].strip() for column in cursor.description]
-                    
-                    while True:
-                        try:
+                    try:
+                        columns = [column[0].strip() for column in cursor.description]
+                        while True:
+                            # We don't swallow all exceptions here to avoid infinite loops.
+                            # HY000 will be caught by the outer block and trigger a retry.
                             row = cursor.fetchone()
                             if row is None:
                                 break
-                            rows_fetched.append(dict(zip(columns, row)))
-                        except Exception as e:
-                            logger.error("Failed to fetch individual row from MDB", error=str(e))
-                            continue
-            return rows_fetched
+                            yield dict(zip(columns, row))
+                        
+                        # Record success latency
+                        elapsed_ms = (time.time() - start_time) * 1000
+                        MDB_LATENCY.labels(operation="execute_query").observe(elapsed_ms)
+                        return # Successfully finished
+                    finally:
+                        try:
+                            conn.close()
+                        except Exception:
+                            pass
 
-        start_time = time.time()
-        try:
-            # Execute with breaker
-            rows = mdb_breaker(_read_data)
-            
-            # Record latency
-            elapsed_ms = (time.time() - start_time) * 1000
-            MDB_LATENCY.labels(operation="execute_query").observe(elapsed_ms)
-            
-            # Yield outside the lock
-            for row_dict in rows:
-                yield row_dict
-
-        except Exception as e:
-            elapsed_ms = (time.time() - start_time) * 1000
-            MDB_LATENCY.labels(operation="execute_query_error").observe(elapsed_ms)
-            logger.error("MDB query failed", error=str(e), query=query)
-            raise
+            except Exception as e:
+                err_msg = str(e)
+                is_last_attempt = (attempt == max_retries - 1)
+                
+                # Specifically handle HY000 and connection errors for retry
+                if ("HY000" in err_msg or "connection" in err_msg.lower()) and not is_last_attempt:
+                    logger.debug(
+                        "MDB retryable error detected. Retrying entire query...",
+                        attempt=attempt + 1,
+                        error=err_msg.split('\n')[0]
+                    )
+                    time.sleep(retry_delay)
+                    continue
+                
+                # Record error latency
+                elapsed_ms = (time.time() - start_time) * 1000
+                MDB_LATENCY.labels(operation="execute_query_error").observe(elapsed_ms)
+                logger.error("MDB query failed permanently", error=err_msg, query=query)
+                raise e
 
     def get_new_records(self, table: str, pk_col: str, last_pk: Optional[str]) -> Iterator[Dict[str, Any]]:
         if "MDBTools" in self.conn_str:

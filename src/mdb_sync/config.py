@@ -52,11 +52,15 @@ class Settings(BaseSettings):
     DB_POOL_RECYCLE: int = 1800
     DB_POOL_TIMEOUT: int = 30
 
-    # Startup Resilience settings (Requirement 1)
+    # Startup Resilience settings (Requirement 1 & 12)
     DB_STARTUP_RETRY_LIMIT: int | None = None  # None for infinite retries
-    DB_STARTUP_MIN_BACKOFF: float = 1.0
-    DB_STARTUP_MAX_BACKOFF: float = 60.0
-    DB_STARTUP_BACKOFF_FACTOR: float = 2.0
+    DB_STARTUP_MIN_BACKOFF: float = 60.0       # Start retry at 60s as requested
+    DB_STARTUP_MAX_BACKOFF: float = 90.0       # Max retry at 90s as requested
+    DB_STARTUP_BACKOFF_FACTOR: float = 1.1
+
+    # Loop Resilience settings
+    LOOP_RETRY_MIN_BACKOFF: float = 60.0
+    LOOP_RETRY_MAX_BACKOFF: float = 90.0
 
     # Circuit Breaker configurations
     CB_FAILURE_THRESHOLD: int = 5

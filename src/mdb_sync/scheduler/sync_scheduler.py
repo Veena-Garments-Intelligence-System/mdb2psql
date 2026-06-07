@@ -262,22 +262,22 @@ class SyncScheduler:
         from src.mdb_sync.utils.health import scheduler_state
         scheduler_state.thread = threading.current_thread()
         
-        backoff = 5.0
-        max_backoff = 300.0
+        backoff = settings.LOOP_RETRY_MIN_BACKOFF
+        max_backoff = settings.LOOP_RETRY_MAX_BACKOFF
         
         while not self._stop_event.is_set():
             try:
                 # A. Circuit Breaker Check
                 if not postgres_breaker.is_available():
                     logger.warning("PostgreSQL circuit breaker is OPEN. Sync operations paused.")
-                    self._stop_event.wait(30)
+                    self._stop_event.wait(settings.LOOP_RETRY_MIN_BACKOFF)
                     continue
 
                 # B. MDB File Integrity Checks
                 from src.mdb_sync.utils.mdb_check import verify_mdb_integrity
                 if not verify_mdb_integrity():
                     logger.warning("MDB file integrity check failed. Sync cycle skipped.")
-                    self._stop_event.wait(30)
+                    self._stop_event.wait(settings.LOOP_RETRY_MIN_BACKOFF)
                     continue
 
                 self.run_once()
@@ -305,7 +305,8 @@ class SyncScheduler:
                 logger.info(f"Sync loop cooling down for {sleep_time:.2f} seconds...")
                 
                 self._stop_event.wait(sleep_time)
-                backoff = min(max_backoff, backoff * 2.0)
+                # Keep backoff within the 60-90s range as requested
+                backoff = min(max_backoff, backoff * 1.1)
                 continue
             
             if self._stop_event.is_set():

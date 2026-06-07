@@ -4,7 +4,7 @@ from src.mdb_sync.logging_config import configure_logging, get_logger
 from src.mdb_sync.infrastructure.mdb.repository import MDBRepository
 from src.mdb_sync.application.sync_engine import SyncEngine
 from src.mdb_sync.scheduler.sync_scheduler import SyncScheduler
-from src.mdb_sync.infrastructure.postgres.database import init_db, engine
+from src.mdb_sync.infrastructure.postgres.database import init_db, engine, SessionLocal
 
 logger = get_logger(__name__)
 

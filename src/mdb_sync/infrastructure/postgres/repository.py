@@ -17,6 +17,14 @@ class PostgresRepository:
     def __init__(self, session: Session):
         self.session = session
 
+    def commit(self):
+        """Commits the current transaction on the session."""
+        self.session.commit()
+
+    def rollback(self):
+        """Rolls back the current transaction on the session."""
+        self.session.rollback()
+
     def _execute_with_breaker(self, operation: str, func, *args, **kwargs):
         start = time.time()
         try:

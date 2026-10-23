@@ -6,7 +6,6 @@ from urllib.parse import urlparse
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from src.mdb_sync.config import settings
-from src.mdb_sync.infrastructure.postgres.models import Base
 from src.mdb_sync.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -155,7 +154,7 @@ def check_and_log_connectivity_diagnostics(retry_in_seconds: float) -> dict:
     return diagnostics
 
 def init_db():
-    """Ensures all tables exist in the database with startup resilience (Requirement 1 & 12)."""
+    """Verifies database connectivity with startup resilience (Requirement 1 & 12)."""
     retry_count = 0
     start_time = time.time()
     
@@ -176,17 +175,14 @@ def init_db():
         check_and_log_connectivity_diagnostics(sleep_time)
         
         try:
-            # 1. Try to connect and execute a test query
+            # Try to connect and execute a test query
             with engine.connect() as conn:
                 conn.execute(select(1))
-            
-            # 2. Try to initialize schema
-            Base.metadata.create_all(bind=engine)
             
             logger.info("Internet Status: OK")
             logger.info("DNS Resolution: OK")
             logger.info("PostgreSQL Reachable: OK")
-            logger.info("Connection Established and Schema Verified")
+            logger.info("Connection Established")
             break
         except Exception as e:
             retry_count += 1

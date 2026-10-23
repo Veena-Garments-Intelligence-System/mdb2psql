@@ -36,11 +36,6 @@ Production-grade incremental synchronization service for replicating Microsoft A
    uv sync
    ```
 
-4. **Run Migrations:**
-   ```bash
-   uv run alembic upgrade head
-   ```
-
 ## Running the Platform
 
 ### Local Execution

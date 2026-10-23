@@ -17,7 +17,7 @@ class Settings(BaseSettings):
             # URI is used as provided in .env (targeting vgis-postgres)
             return self.POSTGRES_URI
         else:
-            # For local tools (Alembic), swap internal host with localhost
+            # For local tools / CLI execution, swap internal host with localhost
             # This allows the same .env to work for both
             return self.POSTGRES_URI.replace("@vgis-postgres", "@localhost")
 

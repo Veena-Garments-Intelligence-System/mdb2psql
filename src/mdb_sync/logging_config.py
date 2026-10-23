@@ -64,7 +64,6 @@ def configure_logging():
 
     # Silence noisy third-party loggers
     logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
-    logging.getLogger("alembic").setLevel(logging.INFO)
     logging.getLogger("pyodbc").setLevel(logging.WARNING)
 
 def get_logger(name: str) -> structlog.stdlib.BoundLogger:

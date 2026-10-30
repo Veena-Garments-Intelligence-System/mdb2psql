@@ -53,21 +53,42 @@ class MDBRepository:
                 conn, cursor = mdb_breaker(_connect_and_execute)
                 columns = [column[0].strip() for column in cursor.description]
 
-                while True:
+                is_mdbtools = "MDBTools" in self.conn_str
+                eof_reached = False
+
+                while not eof_reached:
                     rows = []
                     with mdb_lock:
-                        if hasattr(cursor, "fetchmany"):
-                            res = cursor.fetchmany(self.chunk_size)
-                            if isinstance(res, list):
-                                rows = res
+                        if is_mdbtools:
+                            # CRITICAL: odbc-mdbtools has a known driver bug where fetchmany()
+                            # wraps around and loops infinitely past EOF.
+                            # fetchone() correctly returns None at EOF, but must not be called again once None.
+                            for _ in range(self.chunk_size):
+                                row = cursor.fetchone()
+                                if row is None:
+                                    eof_reached = True
+                                    break
+                                rows.append(row)
+                        else:
+                            if hasattr(cursor, "fetchmany"):
+                                res = cursor.fetchmany(self.chunk_size)
+                                if isinstance(res, list):
+                                    if not res:
+                                        eof_reached = True
+                                    else:
+                                        rows = res
+                                else:
+                                    row = cursor.fetchone()
+                                    if row is None:
+                                        eof_reached = True
+                                    else:
+                                        rows = [row]
                             else:
                                 row = cursor.fetchone()
-                                if row is not None:
+                                if row is None:
+                                    eof_reached = True
+                                else:
                                     rows = [row]
-                        else:
-                            row = cursor.fetchone()
-                            if row is not None:
-                                rows = [row]
 
                     if not rows:
                         break

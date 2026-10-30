@@ -14,6 +14,7 @@ class DataMapper:
             "pg_model": pg_models.RawSale,
             "pk": "Bill_ID",
             "pg_pk": "bill_id",
+            "pk_type": int,
             "fields": {
                 "Bill_ID": "bill_id",
                 "CUSTOMER_ID": "customer_id",
@@ -28,6 +29,7 @@ class DataMapper:
             "pg_model": pg_models.RawReceipt,
             "pk": "Receipt_ID",
             "pg_pk": "receipt_id",
+            "pk_type": int,
             "fields": {
                 "Receipt_ID": "receipt_id",
                 "Customer_ID": "customer_id",
@@ -44,6 +46,7 @@ class DataMapper:
             "pg_model": pg_models.RawRG,
             "pk": "RG_ID",
             "pg_pk": "rg_id",
+            "pk_type": int,
             "fields": {
                 "RG_ID": "rg_id",
                 "CUSTOMER_ID": "customer_id",
@@ -59,6 +62,7 @@ class DataMapper:
             "pg_model": pg_models.RawCustomer,
             "pk": "CUSTOMER_ID",
             "pg_pk": "customer_id",
+            "pk_type": int,
             "fields": {
                 "CUSTOMER_ID": "customer_id",
                 "CUSTOMER_NAME": "customer_name",
@@ -72,6 +76,7 @@ class DataMapper:
             "pg_model": pg_models.RawCity,
             "pk": "City_ID",
             "pg_pk": "city_id",
+            "pk_type": int,
             "fields": {
                 "City_ID": "city_id",
                 "City_Name": "city_name",
@@ -79,6 +84,34 @@ class DataMapper:
             }
         }
     }
+
+    @staticmethod
+    def compare_pks(pk1: Any, pk2: Any, pk_type: type = str) -> int:
+        """
+        Compares two primary keys according to declared pk_type.
+        Returns:
+            1 if pk1 > pk2
+            -1 if pk1 < pk2
+            0 if pk1 == pk2
+        Raises ValueError if values cannot be coerced to declared pk_type.
+        """
+        if pk_type is int:
+            try:
+                v1 = int(float(str(pk1).strip()))
+                v2 = int(float(str(pk2).strip()))
+                return 1 if v1 > v2 else (-1 if v1 < v2 else 0)
+            except (ValueError, TypeError) as e:
+                raise ValueError(f"Cannot compare primary keys as int: pk1={pk1!r}, pk2={pk2!r}") from e
+        else:
+            s1 = str(pk1).strip()
+            s2 = str(pk2).strip()
+            return 1 if s1 > s2 else (-1 if s1 < s2 else 0)
+
+    @staticmethod
+    def is_greater_pk(pk1: Any, pk2: Any, pk_type: type = str) -> bool:
+        """Returns True if pk1 > pk2 using declared pk_type."""
+        return DataMapper.compare_pks(pk1, pk2, pk_type) > 0
+
 
     @staticmethod
     def _parse_date(val: Any) -> Optional[date]:
@@ -335,6 +368,8 @@ class DataMapper:
         data["checksum"] = domain_model.checksum
         data["source_system"] = source_system
         data["is_processed"] = False
+        if hasattr(config["pg_model"], "updated_at"):
+            data["updated_at"] = datetime.now(timezone.utc)
 
         # POPULATE created_at FROM TRANSACTION DATE
         # This applies to Sales, Receipts, and ReturnGoods as requested

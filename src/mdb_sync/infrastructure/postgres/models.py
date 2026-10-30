@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 from typing import Optional
-from sqlalchemy import Boolean, DateTime, Numeric, Text, PrimaryKeyConstraint, Integer
+from sqlalchemy import Boolean, DateTime, Numeric, Text, Integer
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -14,9 +14,13 @@ class TimestampMixin:
 
 class IngestionMixin(TimestampMixin):
     raw_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
-    checksum: Mapped[str] = mapped_column(Text, nullable=False)
+    checksum: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     source_system: Mapped[str] = mapped_column(Text, nullable=False)
     is_processed: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    processed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    processing_batch_id: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    processing_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_processing_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
 class RawCustomer(Base, IngestionMixin):
     __tablename__ = "raw_customers"
@@ -55,10 +59,14 @@ class RawReceipt(Base, IngestionMixin):
 class RawRG(Base):
     __tablename__ = "raw_rg"
     raw_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
-    checksum: Mapped[str] = mapped_column(Text, nullable=False)
+    checksum: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     source_system: Mapped[str] = mapped_column(Text, nullable=False)
     is_processed: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    processed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    processing_batch_id: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    processing_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_processing_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     rg_id: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
     customer_id: Mapped[Optional[str]] = mapped_column(Text)
@@ -67,24 +75,6 @@ class RawRG(Base):
     net_amount: Mapped[Optional[float]] = mapped_column(Numeric)
     is_ok: Mapped[int] = mapped_column(Integer, default=0)
 
-class SyncFingerprint(Base):
-    __tablename__ = "sync_fingerprints"
-    table_name: Mapped[str] = mapped_column(Text, primary_key=True)
-    entity_id: Mapped[str] = mapped_column(Text, primary_key=True)
-    checksum: Mapped[str] = mapped_column(Text, nullable=False)
-    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
-    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
-    last_changed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
-    
-    __table_args__ = (PrimaryKeyConstraint('table_name', 'entity_id'),)
-
-class SyncState(Base):
-    __tablename__ = "sync_state"
-    table_name: Mapped[str] = mapped_column(Text, primary_key=True)
-    last_pk: Mapped[Optional[str]] = mapped_column(Text)
-    last_reconcile_pk: Mapped[Optional[str]] = mapped_column(Text)
-    last_sync_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
 
 class ExternalLock(Base):
     __tablename__ = "sync_locks"

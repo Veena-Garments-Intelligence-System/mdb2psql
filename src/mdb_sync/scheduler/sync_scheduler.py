@@ -3,15 +3,14 @@ import signal
 import time
 import uuid
 import random
+import socket
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import datetime, timezone, timedelta
 from src.mdb_sync.application.sync_engine import SyncEngine
 from src.mdb_sync.logging_config import get_logger
 from src.mdb_sync.config import settings
 from src.mdb_sync.infrastructure.postgres.database import SessionLocal, recreate_db_engine
 from src.mdb_sync.infrastructure.postgres.repository import PostgresRepository
-from src.mdb_sync.utils.metrics import PRUNING_DURATION
 from src.mdb_sync.utils.circuit_breaker import postgres_breaker
 
 logger = get_logger(__name__)
@@ -20,10 +19,9 @@ class SyncScheduler:
     def __init__(self, sync_engine: SyncEngine):
         self.sync_engine = sync_engine
         self.interval = settings.SYNC_INTERVAL_SECONDS
-        self.prune_interval = settings.PRUNE_INTERVAL_SECONDS
         self._stop_event = threading.Event()
-        self._last_prune_at: Optional[datetime] = None
         self.max_workers = 2
+        self.instance_id = f"dbupdater-{socket.gethostname()}-{uuid.uuid4().hex[:8]}"
         
         # Attach signal handlers for graceful shutdown
         signal.signal(signal.SIGINT, self.stop)
@@ -82,37 +80,6 @@ class SyncScheduler:
                     
                 return {"table": table, "mode": mode, "error": err_msg, "scanned": 0, "upserted": 0, "errors": 1}
 
-    def run_pruning(self) -> dict:
-        logger.info("Starting pruning cycle")
-        prune_summary = {}
-        retention = settings.PRUNE_RETENTION_DAYS_PROCESSED
-        prune_targets = ["raw_sales", "raw_receipts", "raw_rg", "raw_customers", "raw_cities"]
-        
-        for table in prune_targets:
-            if self._stop_event.is_set():
-                break
-            start_time = time.time()
-            with SessionLocal() as db:
-                try:
-                      pg_repo = PostgresRepository(db)
-                      count = pg_repo.prune_processed_rows(table, retention)
-                      db.commit()
-                      if count > 0:
-                          logger.info("Pruned table", table=table, count=count)
-                          prune_summary[table] = count
-                except Exception as e:
-                    db.rollback()
-                    err_msg = str(e).split('\n')[0]
-                    logger.error("Pruning failed", table=table, error=err_msg)
-                    prune_summary[table] = f"Error: {err_msg}"
-                finally:
-                    duration = time.time() - start_time
-                    PRUNING_DURATION.labels(table=table).observe(duration)
-        
-        self._cleanup_old_logs(days=7)
-        self._last_prune_at = datetime.now(timezone.utc)
-        return prune_summary
-
     def _cleanup_old_logs(self, days: int = 7):
         """Removes log files in the 'logs' directory older than the specified number of days."""
         import os
@@ -137,9 +104,8 @@ class SyncScheduler:
     def run_once(self):
         cycle_id = str(uuid.uuid4())
         start_time = datetime.now(timezone.utc)
-        from datetime import timedelta
         
-        logger.info("Sync Cycle Started", cycle_id=cycle_id)
+        logger.info("Sync Cycle Started", cycle_id=cycle_id, instance_id=self.instance_id)
         
         # 1. Record the cycle start in sync_runs
         with SessionLocal() as db:
@@ -155,7 +121,7 @@ class SyncScheduler:
             while not lock_acquired and not self._stop_event.is_set():
                 with SessionLocal() as db:
                     pg_repo = PostgresRepository(db)
-                    lock_acquired = pg_repo.acquire_lock("MDB_FILE_LOCK", "dbupdater", timeout_minutes=20)
+                    lock_acquired = pg_repo.acquire_lock("MDB_FILE_LOCK", self.instance_id, timeout_minutes=20)
                     db.commit()
                 
                 if not lock_acquired:
@@ -172,38 +138,39 @@ class SyncScheduler:
             if self._stop_event.is_set():
                 return
 
-            logger.debug("Starting parallel sync cycle", cycle_id=cycle_id)
+            logger.debug("Starting sync cycle execution", cycle_id=cycle_id)
             
-            # 2. Pruning
-            prune_summary = self.run_pruning()
-
-            # 3. Prepare Sync Tasks
-            tasks = []
-            # Master Tables
+            # Master Tables (full sync) and Transactional Tables (fast-path incremental)
             master_tables = ["City_Master", "CUSTOMER_MASTER"]
-            for table in master_tables:
-                tasks.append((table, "full"))
-
-            # Transactional Tables
             transactional_tables = ["BILL_MASTER", "Receipt_Master", "ReturnGoods"]
-            for table in transactional_tables:
-                tasks.append((table, "incremental"))
-                tasks.append((table, "reconcile"))
+            
+            # Phase 1: Full scans and Incremental appends (no table overlap)
+            phase1_tasks = [(table, "full") for table in master_tables] + [(table, "incremental") for table in transactional_tables]
+            
+            # Phase 2: Background reconciliation chunks (executed strictly after Phase 1 to prevent table cursor race)
+            phase2_tasks = [(table, "reconcile") for table in transactional_tables]
 
-            # 4. Execute Sync Parallelly
             cycle_results = []
-            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                future_to_task = {executor.submit(self._sync_table_isolated, t, m, cycle_id): (t, m) for t, m in tasks}
-                
-                for future in as_completed(future_to_task):
-                    try:
-                        result = future.result()
-                        if result:
-                            cycle_results.append(result)
-                    except Exception as e:
-                        t, m = future_to_task[future]
-                        err_msg = str(e).split('\n')[0]
-                        cycle_results.append({"table": t, "mode": m, "error": err_msg, "errors": 1})
+            
+            def execute_task_batch(task_list):
+                if self._stop_event.is_set() or not task_list:
+                    return
+                with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                    future_to_task = {executor.submit(self._sync_table_isolated, t, m, cycle_id): (t, m) for t, m in task_list}
+                    for future in as_completed(future_to_task):
+                        try:
+                            result = future.result()
+                            if result:
+                                cycle_results.append(result)
+                        except Exception as e:
+                            t, m = future_to_task[future]
+                            err_msg = str(e).split('\n')[0]
+                            cycle_results.append({"table": t, "mode": m, "error": err_msg, "errors": 1})
+
+            # Execute Phase 1 first
+            execute_task_batch(phase1_tasks)
+            # Execute Phase 2 next
+            execute_task_batch(phase2_tasks)
 
             # Final Cycle Summary
             end_time = datetime.now(timezone.utc)
@@ -240,8 +207,6 @@ class SyncScheduler:
             }
             if failed_tables:
                 log_data["failed_tasks"] = failed_tables
-            if prune_summary:
-                log_data["pruning"] = prune_summary
 
             if status == "FAILED":
                 logger.warning("Sync cycle completed with issues", **log_data)
@@ -252,9 +217,9 @@ class SyncScheduler:
             if lock_acquired:
                 with SessionLocal() as db:
                     pg_repo = PostgresRepository(db)
-                    pg_repo.release_lock("MDB_FILE_LOCK", "dbupdater")
+                    pg_repo.release_lock("MDB_FILE_LOCK", self.instance_id)
                     db.commit()
-                logger.debug("Released MDB lock")
+                logger.debug("Released MDB lock", instance_id=self.instance_id)
 
     def start(self):
         logger.info("Scheduler Started")

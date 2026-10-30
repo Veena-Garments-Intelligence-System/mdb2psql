@@ -25,11 +25,9 @@ Production-grade incremental synchronization service for replicating Microsoft A
    ```bash
    docker compose up -d
    ```
-   Note: PostgreSQL is exposed on port **5433** to avoid collisions.
-
 2. **Environment:**
    Copy `.env.example` to `.env` and configure your settings.
-   Ensure `MDB_PATH` and `MDB_DRIVER` are correct for your system.
+   Ensure `POSTGRES_URI`, `MDB_PATH`, and `MDB_DRIVER` are correct for your environment.
 
 3. **Install Dependencies:**
    ```bash
@@ -54,12 +52,38 @@ Use the provided PowerShell scripts in `./scripts/`:
 - `src/mdb_sync/scheduler`: Continuous execution loop.
 
 ## Ingestion Philosophy
-We sync only curated columns from MDB into "raw" PostgreSQL tables. No legacy noise, no locks, just cleaned business data.
+We sync curated columns from MDB into "raw" PostgreSQL tables. All processed records are permanently retained in PostgreSQL for historical auditing and VGIS event recalculation.
 
+Raw Tables:
 - `raw_customers`
 - `raw_cities`
 - `raw_sales`
 - `raw_receipts`
-- `raw_rg`
+- `raw_rg` (uses created_at as immutable forensic timestamp)
 
-Tracking is maintained in `sync_state` and `sync_fingerprints`.
+Tracking and Coordination:
+- `sync_checkpoints`: Tracks independent cursors for fast-path incremental sync and background reconciliation.
+- `sync_locks`: Distributed atomic advisory locking with instance ID lease tracking.
+- `sync_failures`: Dead letter queue for resilient error capture without stopping sync cycles.
+- `sync_runs`: Audit logging of each synchronization cycle.
+
+## Database Migrations
+We use Alembic for version-controlled database schema migrations.
+
+### Applying Migrations
+Apply all pending schema migrations:
+```bash
+uv run alembic upgrade head
+```
+
+### Creating New Migrations
+When updating models in `src/mdb_sync/infrastructure/postgres/models.py`, autogenerate a revision:
+```bash
+uv run alembic revision --autogenerate -m "describe_change"
+```
+
+### Schema Initialization (Alternative)
+For fresh manual deployments without Alembic tracking:
+```bash
+uv run python scripts/init_db.py
+```

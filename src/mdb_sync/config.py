@@ -13,13 +13,23 @@ class Settings(BaseSettings):
         # Detect if running inside Docker
         is_docker = os.path.exists("/.dockerenv") or os.environ.get("IS_DOCKER", "false") == "true"
         
+        uri = self.POSTGRES_URI
+        if uri.startswith("postgresql+asyncpg://"):
+            uri = uri.replace("postgresql+asyncpg://", "postgresql://", 1)
+
         if is_docker:
-            # URI is used as provided in .env (targeting vgis-postgres)
-            return self.POSTGRES_URI
+            # Inside Docker container, 127.0.0.1/localhost refers to the container itself.
+            # Map loopback addresses to the docker database service/alias (e.g. postgres or host.docker.internal).
+            docker_host = os.environ.get("POSTGRES_HOST", "postgres")
+            uri = uri.replace("@127.0.0.1", f"@{docker_host}")
+            uri = uri.replace("@localhost", f"@{docker_host}")
+            return uri
         else:
-            # For local tools / CLI execution, swap internal host with localhost
-            # This allows the same .env to work for both
-            return self.POSTGRES_URI.replace("@vgis-postgres", "@localhost")
+            # For local tools / CLI execution on host machine, swap container hostnames with localhost
+            uri = uri.replace("@vgis-postgres", "@localhost")
+            uri = uri.replace("@graphora-postgres", "@localhost")
+            uri = uri.replace("@postgres", "@localhost")
+            return uri.replace("@host.docker.internal", "@localhost")
 
     # MDB
     MDB_PATH: str = "./data/raw/Billing.mdb"
@@ -39,13 +49,6 @@ class Settings(BaseSettings):
     LOCK_RETRY_INTERVAL_SECONDS: int = 30
     LOCK_MAX_WAIT_MINUTES: int = 60 # Allow waiting for long intelligence runs
     
-    # Pruning
-    PRUNE_INTERVAL_SECONDS: int = 3600  # Default 1 hour, but run_once overrides to every cycle
-    PRUNE_RETENTION_DAYS_PROCESSED: int = 0 # Default to 0 for immediate cleanup of processed rows
-    RETENTION_DAYS_SALES: int = 30
-    RETENTION_DAYS_RECEIPTS: int = 30
-    RETENTION_DAYS_RG: int = 30
-
     # DB Connection Pool configuration
     DB_POOL_SIZE: int = 20
     DB_MAX_OVERFLOW: int = 40

@@ -43,11 +43,6 @@ RECONCILIATION_DURATION = Histogram(
     ["table"]
 )
 
-PRUNING_DURATION = Histogram(
-    "pruning_duration_seconds",
-    "Time spent in database pruning cycles",
-    ["table"]
-)
 
 POOL_SIZE = Gauge("connection_pool_size", "SQLAlchemy connection pool configured size")
 POOL_CHECKED_OUT = Gauge("connection_pool_checked_out", "SQLAlchemy connection pool checked out connections")

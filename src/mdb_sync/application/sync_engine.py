@@ -96,7 +96,8 @@ class SyncEngine:
 
         logger.debug("Starting incremental sync", table=table_name, last_pk=last_pk)
         
-        row_generator = self.mdb_repo.get_new_records(table_name, config["pk"], last_pk)
+        pk_type = config.get("pk_type", str)
+        row_generator = self.mdb_repo.get_new_records(table_name, config["pk"], last_pk, pk_type)
         
         first_row_logged = False
         scanned_count = 0
@@ -106,7 +107,6 @@ class SyncEngine:
         batch_size = 1000
         
         data_batch = []
-        fingerprint_batch = []
 
         def flush_batch():
             nonlocal upserted_count, error_count
@@ -115,9 +115,8 @@ class SyncEngine:
             batch_start = time.time()
             try:
                 # Propose batch insert
-                self.pg_repo.upsert_batch(config["pg_model"], data_batch, config["pg_pk"])
-                self.pg_repo.update_fingerprints_batch(table_name, fingerprint_batch)
-                upserted_count += len(data_batch)
+                affected = self.pg_repo.upsert_batch(config["pg_model"], data_batch, config["pg_pk"])
+                upserted_count += (affected if affected is not None else len(data_batch))
                 
                 batch_dur_ms = (time.time() - batch_start) * 1000
                 logger.info("Batch flush completed", 
@@ -134,10 +133,10 @@ class SyncEngine:
                 for idx, pg_data in enumerate(data_batch):
                     entity_id = pg_data.get(config["pg_pk"])
                     try:
-                        self.pg_repo.upsert(config["pg_model"], pg_data, config["pg_pk"])
-                        self.pg_repo.update_fingerprints_batch(table_name, [fingerprint_batch[idx]])
+                        affected = self.pg_repo.upsert(config["pg_model"], pg_data, config["pg_pk"])
                         self.pg_repo.commit()
-                        upserted_count += 1
+                        if affected or affected is None:
+                            upserted_count += 1
                     except Exception as row_err:
                         self.pg_repo.rollback()
                         error_count += 1
@@ -158,7 +157,6 @@ class SyncEngine:
                             self.pg_repo.rollback()
             finally:
                 data_batch.clear()
-                fingerprint_batch.clear()
 
         for row in row_generator:
             if self.stop_event and self.stop_event.is_set():
@@ -169,26 +167,25 @@ class SyncEngine:
                     logger.debug("TABLE SAMPLE", table=table_name, columns=list(row.keys()), sample=str(row))
                     first_row_logged = True
 
-                current_pk = str(row[config["pk"]])
-                if last_pk and not (current_pk > last_pk):
-                    continue
+                current_pk = row[config["pk"]]
+                if last_pk is not None and str(last_pk).strip() != "":
+                    if not DataMapper.is_greater_pk(current_pk, last_pk, pk_type):
+                        continue
                     
                 scanned_count += 1
                 domain_model = DataMapper.map_to_domain(table_name, row)
                 pg_data = DataMapper.map_to_pg(table_name, domain_model, settings.SOURCE_SYSTEM)
                 
                 data_batch.append(pg_data)
-                fingerprint_batch.append((str(getattr(domain_model, config["pg_pk"])), domain_model.checksum))
                 
-                new_last_pk = current_pk
+                new_last_pk = str(current_pk)
                 
                 if scanned_count % 1000 == 0:
                     logger.info("Syncing in progress...", table=table_name, scanned=scanned_count, upserted=upserted_count)
 
                 if len(data_batch) >= batch_size:
                     flush_batch()
-                    last_rec_key = checkpoint.last_reconcile_key if checkpoint else None
-                    self.pg_repo.update_checkpoint(table_name, last_sync_key=new_last_pk, last_reconcile_key=last_rec_key, cycle_id=self.cycle_id)
+                    self.pg_repo.update_checkpoint(table_name, last_sync_key=new_last_pk, cycle_id=self.cycle_id)
                     self.pg_repo.commit()
 
             except Exception as e:
@@ -210,15 +207,14 @@ class SyncEngine:
                     self.pg_repo.rollback()
                 
                 data_batch.clear()
-                fingerprint_batch.clear()
                 continue
 
         # Final flush
         if data_batch:
             flush_batch()
-            last_rec_key = checkpoint.last_reconcile_key if checkpoint else None
-            self.pg_repo.update_checkpoint(table_name, last_sync_key=new_last_pk, last_reconcile_key=last_rec_key, cycle_id=self.cycle_id)
+            self.pg_repo.update_checkpoint(table_name, last_sync_key=new_last_pk, cycle_id=self.cycle_id)
             self.pg_repo.commit()
+
             
         duration = time.time() - start_time
         
@@ -245,7 +241,8 @@ class SyncEngine:
         checkpoint = self.pg_repo.get_checkpoint(table_name)
         last_reconcile_pk = checkpoint.last_reconcile_key if checkpoint else None
 
-        row_generator = self.mdb_repo.get_new_records(table_name, config["pk"], last_reconcile_pk)
+        pk_type = config.get("pk_type", str)
+        row_generator = self.mdb_repo.get_new_records(table_name, config["pk"], last_reconcile_pk, pk_type)
         
         first_row_logged = False
         scanned_count = 0
@@ -253,9 +250,11 @@ class SyncEngine:
         error_count = 0
         new_last_reconcile_pk = last_reconcile_pk
         batch_size = 1000
+        stopped_early = False
+        reached_chunk_limit = False
+        row_exhausted = False
         
         data_batch = []
-        fingerprint_batch = []
 
         def flush_batch():
             nonlocal updated_count, error_count
@@ -263,9 +262,8 @@ class SyncEngine:
                 return
             batch_start = time.time()
             try:
-                self.pg_repo.upsert_batch(config["pg_model"], data_batch, config["pg_pk"])
-                self.pg_repo.update_fingerprints_batch(table_name, fingerprint_batch)
-                updated_count += len(data_batch)
+                affected = self.pg_repo.upsert_batch(config["pg_model"], data_batch, config["pg_pk"])
+                updated_count += (affected if affected is not None else len(data_batch))
                 
                 batch_dur_ms = (time.time() - batch_start) * 1000
                 logger.info("Batch flush completed", 
@@ -281,10 +279,10 @@ class SyncEngine:
                 for idx, pg_data in enumerate(data_batch):
                     entity_id = pg_data.get(config["pg_pk"])
                     try:
-                        self.pg_repo.upsert(config["pg_model"], pg_data, config["pg_pk"])
-                        self.pg_repo.update_fingerprints_batch(table_name, [fingerprint_batch[idx]])
+                        affected = self.pg_repo.upsert(config["pg_model"], pg_data, config["pg_pk"])
                         self.pg_repo.commit()
-                        updated_count += 1
+                        if affected or affected is None:
+                            updated_count += 1
                     except Exception as row_err:
                         self.pg_repo.rollback()
                         error_count += 1
@@ -304,39 +302,39 @@ class SyncEngine:
                             self.pg_repo.rollback()
             finally:
                 data_batch.clear()
-                fingerprint_batch.clear()
 
         for row in row_generator:
             if self.stop_event and self.stop_event.is_set():
                 logger.warning("Stop event detected. Stopping reconciliation early...", table=table_name)
+                stopped_early = True
                 break
             try:
                 if not first_row_logged:
                     logger.debug("TABLE SAMPLE", table=table_name, columns=list(row.keys()), sample=str(row))
                     first_row_logged = True
-                current_pk = str(row[config["pk"]])
-                if last_reconcile_pk and not (current_pk > last_reconcile_pk):
-                    continue
+                current_pk = row[config["pk"]]
+                if last_reconcile_pk is not None and str(last_reconcile_pk).strip() != "":
+                    if not DataMapper.is_greater_pk(current_pk, last_reconcile_pk, pk_type):
+                        continue
                         
                 scanned_count += 1
                 domain_model = DataMapper.map_to_domain(table_name, row)
                 pg_data = DataMapper.map_to_pg(table_name, domain_model, settings.SOURCE_SYSTEM)
                 
                 data_batch.append(pg_data)
-                fingerprint_batch.append((str(getattr(domain_model, config["pg_pk"])), domain_model.checksum))
                 
-                new_last_reconcile_pk = current_pk
+                new_last_reconcile_pk = str(current_pk)
                 
                 if scanned_count % 1000 == 0:
                     logger.info("Reconciliation in progress...", table=table_name, scanned=scanned_count, updated=updated_count)
 
                 if len(data_batch) >= batch_size:
                     flush_batch()
-                    last_s_key = checkpoint.last_sync_key if checkpoint else None
-                    self.pg_repo.update_checkpoint(table_name, last_sync_key=last_s_key, last_reconcile_key=new_last_reconcile_pk, cycle_id=self.cycle_id)
+                    self.pg_repo.update_checkpoint(table_name, last_reconcile_key=new_last_reconcile_pk, cycle_id=self.cycle_id)
                     self.pg_repo.commit()
                 
                 if scanned_count >= chunk_limit:
+                    reached_chunk_limit = True
                     break
 
             except Exception as e:
@@ -358,19 +356,32 @@ class SyncEngine:
                     self.pg_repo.rollback()
                     
                 data_batch.clear()
-                fingerprint_batch.clear()
                 continue
+        else:
+            row_exhausted = True
 
         if data_batch:
             flush_batch()
 
-        if scanned_count < chunk_limit:
+        # If naturally exhausted (all records past cursor scanned without early stop or hitting limit),
+        # wrap around for next reconciliation cycle
+        if row_exhausted and not stopped_early and not reached_chunk_limit:
             new_last_reconcile_pk = None
 
-        if scanned_count > 0:
-            last_s_key = checkpoint.last_sync_key if checkpoint else None
-            self.pg_repo.update_checkpoint(table_name, last_sync_key=last_s_key, last_reconcile_key=new_last_reconcile_pk, cycle_id=self.cycle_id)
+        if scanned_count > 0 or row_exhausted:
+            self.pg_repo.update_checkpoint(table_name, last_reconcile_key=new_last_reconcile_pk, cycle_id=self.cycle_id)
             self.pg_repo.commit()
+            
+        duration = time.time() - start_time
+        
+        # Expose Metrics
+        SYNC_ROWS.labels(table=table_name, mode="reconcile", status="success").inc(updated_count)
+        if error_count > 0:
+            SYNC_ROWS.labels(table=table_name, mode="reconcile", status="failed").inc(error_count)
+            SYNC_ERRORS.labels(table=table_name, mode="reconcile", error_type="row_failure").inc(error_count)
+        RECONCILIATION_DURATION.labels(table=table_name).observe(duration)
+            
+        return {"table": table_name, "mode": "reconcile", "scanned": scanned_count, "updated": updated_count, "errors": error_count}
             
         duration = time.time() - start_time
         
@@ -399,7 +410,6 @@ class SyncEngine:
         batch_size = 1000
         
         data_batch = []
-        fingerprint_batch = []
 
         def flush_batch():
             nonlocal upserted_count, error_count
@@ -407,9 +417,8 @@ class SyncEngine:
                 return
             batch_start = time.time()
             try:
-                self.pg_repo.upsert_batch(config["pg_model"], data_batch, config["pg_pk"])
-                self.pg_repo.update_fingerprints_batch(table_name, fingerprint_batch)
-                upserted_count += len(data_batch)
+                affected = self.pg_repo.upsert_batch(config["pg_model"], data_batch, config["pg_pk"])
+                upserted_count += (affected if affected is not None else len(data_batch))
                 
                 batch_dur_ms = (time.time() - batch_start) * 1000
                 logger.info("Batch flush completed", 
@@ -425,10 +434,10 @@ class SyncEngine:
                 for idx, pg_data in enumerate(data_batch):
                     entity_id = pg_data.get(config["pg_pk"])
                     try:
-                        self.pg_repo.upsert(config["pg_model"], pg_data, config["pg_pk"])
-                        self.pg_repo.update_fingerprints_batch(table_name, [fingerprint_batch[idx]])
+                        affected = self.pg_repo.upsert(config["pg_model"], pg_data, config["pg_pk"])
                         self.pg_repo.commit()
-                        upserted_count += 1
+                        if affected or affected is None:
+                            upserted_count += 1
                     except Exception as row_err:
                         self.pg_repo.rollback()
                         error_count += 1
@@ -448,7 +457,6 @@ class SyncEngine:
                             self.pg_repo.rollback()
             finally:
                 data_batch.clear()
-                fingerprint_batch.clear()
 
         for row in row_generator:
             if self.stop_event and self.stop_event.is_set():
@@ -463,7 +471,6 @@ class SyncEngine:
                 pg_data = DataMapper.map_to_pg(table_name, domain_model, settings.SOURCE_SYSTEM)
                 
                 data_batch.append(pg_data)
-                fingerprint_batch.append((str(getattr(domain_model, config["pg_pk"])), domain_model.checksum))
                 
                 if scanned_count % 1000 == 0:
                     logger.info("Full scan in progress...", table=table_name, scanned=scanned_count, upserted=upserted_count)
@@ -491,15 +498,14 @@ class SyncEngine:
                     self.pg_repo.rollback()
                     
                 data_batch.clear()
-                fingerprint_batch.clear()
                 continue
 
         if data_batch:
             flush_batch()
             self.pg_repo.commit()
 
-        # Update checkpoint for full scan
-        self.pg_repo.update_checkpoint(table_name, last_sync_key=None, last_reconcile_key=None, cycle_id=self.cycle_id)
+        # Update checkpoint for full scan without clobbering keys
+        self.pg_repo.update_checkpoint(table_name, cycle_id=self.cycle_id)
         self.pg_repo.commit()
             
         duration = time.time() - start_time

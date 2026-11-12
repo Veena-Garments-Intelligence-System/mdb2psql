@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS raw_sales (
     ref_no NUMERIC NULL,
     company_id TEXT NULL,
     session_id TEXT NULL,
+    is_lock BOOLEAN NOT NULL DEFAULT FALSE,
     is_deleted BOOLEAN NOT NULL DEFAULT FALSE
 );
 CREATE INDEX IF NOT EXISTS idx_raw_sales_is_processed ON raw_sales (is_processed);

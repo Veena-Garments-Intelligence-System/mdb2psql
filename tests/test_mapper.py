@@ -153,3 +153,24 @@ def test_new_columns_mapping():
     }
     rg = DataMapper.map_to_domain("ReturnGoods", mdb_rg)
     assert rg.is_ok == 0
+
+    # Test BILL_MASTER is_lock mapping
+    mdb_sale_locked = {
+        "Bill_ID": "B010",
+        "CUSTOMER_ID": "C001",
+        "Is_Lock": "1"
+    }
+    sale_locked = DataMapper.map_to_domain("BILL_MASTER", mdb_sale_locked)
+    assert sale_locked.is_lock is True
+    pg_locked = DataMapper.map_to_pg("BILL_MASTER", sale_locked, "TEST")
+    assert pg_locked["is_lock"] is True
+
+    mdb_sale_unlocked = {
+        "Bill_ID": "B011",
+        "CUSTOMER_ID": "C001",
+        "Is_Lock": 0
+    }
+    sale_unlocked = DataMapper.map_to_domain("BILL_MASTER", mdb_sale_unlocked)
+    assert sale_unlocked.is_lock is False
+    pg_unlocked = DataMapper.map_to_pg("BILL_MASTER", sale_unlocked, "TEST")
+    assert pg_unlocked["is_lock"] is False

@@ -91,6 +91,7 @@ class Sale(BaseEntity):
     ref_no: Optional[float] = None
     company_id: Optional[str] = None
     session_id: Optional[str] = None
+    is_lock: Optional[bool] = False
     is_deleted: Optional[bool] = False
 
 class BillDetail(BaseEntity):

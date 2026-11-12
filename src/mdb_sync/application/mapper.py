@@ -49,6 +49,7 @@ class DataMapper:
                 "Ref_no": "ref_no",
                 "Company_ID": "company_id",
                 "Session_Id": "session_id",
+                "Is_Lock": "is_lock",
             }
         },
         "Bill_Detail": {

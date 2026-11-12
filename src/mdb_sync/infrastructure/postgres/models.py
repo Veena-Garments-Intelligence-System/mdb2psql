@@ -71,6 +71,7 @@ class RawSale(Base, IngestionMixin):
     ref_no: Mapped[Optional[float]] = mapped_column(Numeric, nullable=True)
     company_id: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     session_id: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    is_lock: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
 class RawBillDetail(Base, IngestionMixin):

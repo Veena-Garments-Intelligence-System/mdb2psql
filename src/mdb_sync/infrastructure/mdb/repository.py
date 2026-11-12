@@ -137,29 +137,31 @@ class MDBRepository:
                     except Exception:
                         pass
 
-    def get_new_records(self, table: str, pk_col: str, last_pk: Optional[Any], pk_type: type = str) -> Iterator[Dict[str, Any]]:
+    def get_new_records(self, table: str, pk_col: str | list[str], last_pk: Optional[Any], pk_type: type = str) -> Iterator[Dict[str, Any]]:
         if "MDBTools" in self.conn_str:
             query = f"SELECT * FROM {table}"
             return self.execute_query_yield(query)
         
+        col = pk_col[0] if isinstance(pk_col, (list, tuple)) else pk_col
         if last_pk is not None and str(last_pk).strip() != "":
             try:
                 param = int(float(str(last_pk).strip())) if pk_type is int else str(last_pk).strip()
             except (ValueError, TypeError):
                 param = str(last_pk).strip()
-            query = f"SELECT * FROM {table} WHERE {pk_col} > ? ORDER BY {pk_col} ASC"
+            query = f"SELECT * FROM {table} WHERE {col} > ? ORDER BY {col} ASC"
             return self.execute_query_yield(query, (param,))
         else:
-            query = f"SELECT * FROM {table} ORDER BY {pk_col} ASC"
+            query = f"SELECT * FROM {table} ORDER BY {col} ASC"
             return self.execute_query_yield(query)
 
-    def get_full_scan(self, table: str, pk_col: Optional[str] = None) -> Iterator[Dict[str, Any]]:
+    def get_full_scan(self, table: str, pk_col: Optional[str | list[str]] = None) -> Iterator[Dict[str, Any]]:
         if "MDBTools" in self.conn_str:
             query = f"SELECT * FROM {table}"
             return self.execute_query_yield(query)
             
         if pk_col:
-            query = f"SELECT * FROM {table} ORDER BY {pk_col} ASC"
+            col = pk_col[0] if isinstance(pk_col, (list, tuple)) else pk_col
+            query = f"SELECT * FROM {table} ORDER BY {col} ASC"
         else:
             query = f"SELECT * FROM {table}"
         return self.execute_query_yield(query)

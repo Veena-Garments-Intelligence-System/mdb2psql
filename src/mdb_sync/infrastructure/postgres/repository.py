@@ -74,21 +74,32 @@ class PostgresRepository:
             return (res.rowcount or 0) > 0
         return self._execute_with_breaker("release_lock", _op)
 
-    def upsert_batch(self, model_class: Type[T], data_list: list[dict], unique_col: str) -> int:
+    def upsert_batch(self, model_class: Type[T], data_list: list[dict], unique_col: str | list[str]) -> int:
         if not data_list:
             return 0
 
+        unique_cols = [unique_col] if isinstance(unique_col, str) else list(unique_col)
+        # Deduplicate incoming batch by unique constraint columns to prevent Postgres CardinalityViolation
+        deduped = {}
+        for r in data_list:
+            k = tuple(r.get(c) for c in unique_cols)
+            deduped[k] = r
+        clean_list = list(deduped.values())
+        if not clean_list:
+            return 0
+
         def _op():
-            stmt = insert(model_class).values(data_list)
-            first_row = data_list[0]
+            stmt = insert(model_class).values(clean_list)
+            first_row = clean_list[0]
             
-            exclude = {unique_col, 'raw_id'}
+            exclude = set(unique_cols) | {'raw_id'}
             if 'created_at' not in first_row:
                 exclude.add('created_at')
                 
+            valid_columns = set(model_class.__table__.columns.keys())
             update_cols = [
                 k for k in first_row.keys()
-                if k not in exclude
+                if k not in exclude and k in valid_columns
             ]
             
             update_dict = {col: getattr(stmt.excluded, col) for col in update_cols}
@@ -103,13 +114,13 @@ class PostgresRepository:
             
             if 'checksum' in update_dict:
                 stmt = stmt.on_conflict_do_update(
-                    index_elements=[unique_col],
+                    index_elements=unique_cols,
                     set_=update_dict,
                     where=(getattr(model_class, 'checksum').is_distinct_from(stmt.excluded.checksum))
                 )
             else:
                 stmt = stmt.on_conflict_do_update(
-                    index_elements=[unique_col],
+                    index_elements=unique_cols,
                     set_=update_dict
                 )
                 
@@ -117,17 +128,19 @@ class PostgresRepository:
             return res.rowcount if res and res.rowcount is not None else len(data_list)
         return self._execute_with_breaker("upsert_batch", _op)
 
-    def upsert(self, model_class: Type[T], data: dict, unique_col: str) -> int:
+    def upsert(self, model_class: Type[T], data: dict, unique_col: str | list[str]) -> int:
         def _op():
             stmt = insert(model_class).values(**data)
             
-            exclude = {unique_col, 'raw_id'}
+            unique_cols = [unique_col] if isinstance(unique_col, str) else list(unique_col)
+            exclude = set(unique_cols) | {'raw_id'}
             if 'created_at' not in data:
                 exclude.add('created_at')
 
+            valid_columns = set(model_class.__table__.columns.keys())
             update_dict = {
                 k: v for k, v in stmt.excluded.items() 
-                if k not in exclude
+                if k not in exclude and k in valid_columns
             }
             if hasattr(model_class, 'updated_at') and 'updated_at' not in update_dict:
                 update_dict['updated_at'] = func.now()
@@ -140,13 +153,13 @@ class PostgresRepository:
             
             if 'checksum' in update_dict:
                 stmt = stmt.on_conflict_do_update(
-                    index_elements=[unique_col],
+                    index_elements=unique_cols,
                     set_=update_dict,
                     where=(getattr(model_class, 'checksum').is_distinct_from(stmt.excluded.checksum))
                 )
             else:
                 stmt = stmt.on_conflict_do_update(
-                    index_elements=[unique_col],
+                    index_elements=unique_cols,
                     set_=update_dict
                 )
                 

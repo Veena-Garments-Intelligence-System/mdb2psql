@@ -58,6 +58,8 @@ class SyncScheduler:
                     result = local_engine.sync_table_incremental(table)
                 elif mode == "reconcile":
                     result = local_engine.reconcile_table_chunk(table, chunk_limit=settings.RECONCILIATION_CHUNK_LIMIT)
+                elif mode == "deletions":
+                    result = local_engine.sync_deletions()
                 
                 if result:
                     logger.info("Table sync completed", 
@@ -142,13 +144,18 @@ class SyncScheduler:
             
             # Master Tables (full sync) and Transactional Tables (fast-path incremental)
             master_tables = ["City_Master", "CUSTOMER_MASTER"]
-            transactional_tables = ["BILL_MASTER", "Receipt_Master", "ReturnGoods"]
+            transactional_tables = ["BILL_MASTER", "Receipt_Master", "ReturnGoods", "LR_MASTER", "LR_Detail"]
             
-            # Phase 1: Full scans and Incremental appends (no table overlap)
-            phase1_tasks = [(table, "full") for table in master_tables] + [(table, "incremental") for table in transactional_tables]
+            # Phase 1: Full scans, Incremental appends, and Deletions
+            phase1_tasks = (
+                [(table, "full") for table in master_tables]
+                + [(table, "incremental") for table in transactional_tables]
+                + [("Delete_Record", "deletions")]
+            )
             
             # Phase 2: Background reconciliation chunks (executed strictly after Phase 1 to prevent table cursor race)
-            phase2_tasks = [(table, "reconcile") for table in transactional_tables]
+            reconcile_tables = ["BILL_MASTER", "Receipt_Master", "ReturnGoods", "LR_MASTER"]
+            phase2_tasks = [(table, "reconcile") for table in reconcile_tables]
 
             cycle_results = []
             

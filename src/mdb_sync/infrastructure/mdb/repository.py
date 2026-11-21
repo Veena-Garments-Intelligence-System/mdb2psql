@@ -24,89 +24,145 @@ class MDBRepository:
             except Exception:
                 return repr(value)
 
-        # Optimization: Use a generator to avoid materializing large lists in memory.
-        # We handle retries at the connection level. If a fetch fails mid-query, 
-        # we retry the entire query (relying on upserts to handle duplicates).
+        # Retries up to max_retries on connection or transient MDB lock errors (HY000)
+        # ONLY IF no rows have been yielded yet.
+        # Once records have begun streaming to the caller, mid-stream failures raise immediately
+        # to prevent duplicate generator yields (FINDING-005).
+        # mdb_lock is acquired only for fetching batches, not held during downstream yields (FINDING-011).
         max_retries = 3
         retry_delay = 2
-        
         start_time = time.time()
+        has_yielded = False
         
         for attempt in range(max_retries):
+            conn = None
+            cursor = None
             try:
-                with mdb_lock:
-                    # We wrap the connection and execution in the breaker via a helper
-                    def _connect_and_execute():
-                        conn = pyodbc.connect(self.conn_str, readonly=True)
+                def _connect_and_execute():
+                    nonlocal conn, cursor
+                    with mdb_lock:
+                        c = pyodbc.connect(self.conn_str, readonly=True)
                         if "MDBTools" in self.conn_str:
-                            conn.add_output_converter(pyodbc.SQL_TYPE_TIMESTAMP, robust_date_handler)
-                            conn.add_output_converter(pyodbc.SQL_TYPE_DATE, robust_date_handler)
+                            c.add_output_converter(pyodbc.SQL_TYPE_TIMESTAMP, robust_date_handler)
+                            c.add_output_converter(pyodbc.SQL_TYPE_DATE, robust_date_handler)
                         
-                        cursor = conn.cursor()
-                        cursor.execute(query, params)
-                        return conn, cursor
+                        cur = c.cursor()
+                        cur.execute(query, params)
+                        return c, cur
 
-                    conn, cursor = mdb_breaker(_connect_and_execute)
-                    
-                    try:
-                        columns = [column[0].strip() for column in cursor.description]
-                        while True:
-                            # We don't swallow all exceptions here to avoid infinite loops.
-                            # HY000 will be caught by the outer block and trigger a retry.
-                            row = cursor.fetchone()
-                            if row is None:
-                                break
-                            yield dict(zip(columns, row))
-                        
-                        # Record success latency
-                        elapsed_ms = (time.time() - start_time) * 1000
-                        MDB_LATENCY.labels(operation="execute_query").observe(elapsed_ms)
-                        return # Successfully finished
-                    finally:
-                        try:
-                            conn.close()
-                        except Exception:
-                            pass
+                conn, cursor = mdb_breaker(_connect_and_execute)
+                columns = [column[0].strip() for column in cursor.description]
+
+                is_mdbtools = "MDBTools" in self.conn_str
+                eof_reached = False
+
+                while not eof_reached:
+                    rows = []
+                    with mdb_lock:
+                        if is_mdbtools:
+                            # CRITICAL: odbc-mdbtools has a known driver bug where fetchmany()
+                            # wraps around and loops infinitely past EOF.
+                            # fetchone() correctly returns None at EOF, but must not be called again once None.
+                            for _ in range(self.chunk_size):
+                                row = cursor.fetchone()
+                                if row is None:
+                                    eof_reached = True
+                                    break
+                                rows.append(row)
+                        else:
+                            if hasattr(cursor, "fetchmany"):
+                                res = cursor.fetchmany(self.chunk_size)
+                                if isinstance(res, list):
+                                    if not res:
+                                        eof_reached = True
+                                    else:
+                                        rows = res
+                                else:
+                                    row = cursor.fetchone()
+                                    if row is None:
+                                        eof_reached = True
+                                    else:
+                                        rows = [row]
+                            else:
+                                row = cursor.fetchone()
+                                if row is None:
+                                    eof_reached = True
+                                else:
+                                    rows = [row]
+
+                    if not rows:
+                        break
+
+                    for row in rows:
+                        has_yielded = True
+                        yield dict(zip(columns, row))
+
+                elapsed_ms = (time.time() - start_time) * 1000
+                MDB_LATENCY.labels(operation="execute_query").observe(elapsed_ms)
+                return
 
             except Exception as e:
                 err_msg = str(e)
+                # CRITICAL: Prevent duplicate yields on mid-stream failure (FINDING-005)
+                if has_yielded:
+                    elapsed_ms = (time.time() - start_time) * 1000
+                    MDB_LATENCY.labels(operation="execute_query_error").observe(elapsed_ms)
+                    logger.error("MDB mid-stream query failure after yielding rows; aborting without retry to prevent duplicates",
+                                 error=err_msg, query=query)
+                    raise e
+
                 is_last_attempt = (attempt == max_retries - 1)
-                
-                # Specifically handle HY000 and connection errors for retry
                 if ("HY000" in err_msg or "connection" in err_msg.lower()) and not is_last_attempt:
                     logger.debug(
-                        "MDB retryable error detected. Retrying entire query...",
+                        "MDB retryable error detected before any rows yielded. Retrying...",
                         attempt=attempt + 1,
                         error=err_msg.split('\n')[0]
                     )
                     time.sleep(retry_delay)
                     continue
-                
-                # Record error latency
+
                 elapsed_ms = (time.time() - start_time) * 1000
                 MDB_LATENCY.labels(operation="execute_query_error").observe(elapsed_ms)
                 logger.error("MDB query failed permanently", error=err_msg, query=query)
                 raise e
+            finally:
+                if cursor:
+                    try:
+                        cursor.close()
+                    except Exception:
+                        pass
+                if conn:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
 
-    def get_new_records(self, table: str, pk_col: str, last_pk: Optional[str]) -> Iterator[Dict[str, Any]]:
+    def get_new_records(self, table: str, pk_col: str | list[str], last_pk: Optional[Any], pk_type: type = str) -> Iterator[Dict[str, Any]]:
         if "MDBTools" in self.conn_str:
             query = f"SELECT * FROM {table}"
             return self.execute_query_yield(query)
         
-        if last_pk:
-            query = f"SELECT * FROM {table} WHERE {pk_col} > ? ORDER BY {pk_col} ASC"
-            return self.execute_query_yield(query, (last_pk,))
+        col = pk_col[0] if isinstance(pk_col, (list, tuple)) else pk_col
+        if last_pk is not None and str(last_pk).strip() != "":
+            try:
+                param = int(float(str(last_pk).strip())) if pk_type is int else str(last_pk).strip()
+            except (ValueError, TypeError):
+                param = str(last_pk).strip()
+            query = f"SELECT * FROM {table} WHERE {col} > ? ORDER BY {col} ASC"
+            return self.execute_query_yield(query, (param,))
         else:
-            query = f"SELECT * FROM {table} ORDER BY {pk_col} ASC"
+            query = f"SELECT * FROM {table} ORDER BY {col} ASC"
             return self.execute_query_yield(query)
 
-    def get_full_scan(self, table: str, pk_col: Optional[str] = None) -> Iterator[Dict[str, Any]]:
+    def get_full_scan(self, table: str, pk_col: Optional[str | list[str]] = None) -> Iterator[Dict[str, Any]]:
         if "MDBTools" in self.conn_str:
             query = f"SELECT * FROM {table}"
             return self.execute_query_yield(query)
             
         if pk_col:
-            query = f"SELECT * FROM {table} ORDER BY {pk_col} ASC"
+            col = pk_col[0] if isinstance(pk_col, (list, tuple)) else pk_col
+            query = f"SELECT * FROM {table} ORDER BY {col} ASC"
         else:
             query = f"SELECT * FROM {table}"
         return self.execute_query_yield(query)
+

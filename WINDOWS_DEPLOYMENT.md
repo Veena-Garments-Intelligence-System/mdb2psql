@@ -29,6 +29,10 @@ To run the MDB Sync Platform as a persistent background service on Windows that 
     MDB_DRIVER={Microsoft Access Driver (*.mdb, *.accdb)}
     LOG_LEVEL=info
     ```
+5.  Initialize the PostgreSQL schema (first-time deployment):
+    ```powershell
+    python scripts\init_db.py
+    ```
 
 ## 2. Install as a Windows Service
 

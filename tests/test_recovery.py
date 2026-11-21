@@ -42,8 +42,7 @@ def test_circuit_breaker_flow():
 
 # 2. Test DB Startup Resilience
 @patch("src.mdb_sync.infrastructure.postgres.database.engine.connect")
-@patch("src.mdb_sync.infrastructure.postgres.database.Base.metadata.create_all")
-def test_db_startup_resilience_success(mock_create_all, mock_connect):
+def test_db_startup_resilience_success(mock_connect):
     # Mock settings for fast retries
     with patch.object(settings, "DB_STARTUP_RETRY_LIMIT", 5), \
          patch.object(settings, "DB_STARTUP_MIN_BACKOFF", 0.001), \
@@ -62,8 +61,6 @@ def test_db_startup_resilience_success(mock_create_all, mock_connect):
         
         # Verify engine.connect was called 3 times
         assert mock_connect.call_count == 3
-        # Verify tables creation was called after success
-        mock_create_all.assert_called_once()
 
 
 # 3. Test MDB File Integrity Check behavior
